@@ -51,7 +51,7 @@ Here's a clear breakdown of how to recreate the **LegalSumm** approach for impro
     - Use ROUGE metrics (ROUGE-N, ROUGE-L) to compare generated summaries to ground-truth.
     - Optionally, conduct human expert evaluation for coverage, coherence, faithfulness, and replaceability.
 
-# Detailed Version
+# Detailed Vcersion
 
 ### **Phase 0: Environment Setup (The "Before You Start")**
 
