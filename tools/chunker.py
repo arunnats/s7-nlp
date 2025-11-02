@@ -1,44 +1,53 @@
 #!/usr/bin/env python3
-"""Simple chunking utility for RulingBR-style documents.
+"""
+Simple chunking utility for RulingBR-style documents.
 
-Implements the 8 chunking strategies referenced in the project's
-`implementation.md`. Intended to be run from the repository root and
-used against `rulingbr/sample-5.json` or extracted `rulingbr-v1.2.jsonl`.
+This script reads legal documents in JSON or JSONL format, applies 8 different
+chunking strategies as defined in the source paper, and writes the output
+directly into an OpenNMT-py compatible directory structure. This avoids
+manual data formatting and prepares the data for training the summarization models.
 
 Usage:
-  python tools/chunker.py --input rulingbr/sample-5.json --strategy 1 --out samples_ch1.jsonl
+  # Process all 8 strategies for the training set into the 'data_for_opennmt' directory
+  python this_script.py --input train_data.jsonl --out data_for_opennmt --prefix train
 
-The script reads JSONL or a JSON array file and writes JSONL with added
-`chunks` field containing an array of chunk texts (one per strategy)
-for each document.
+  # Process only strategy 3 for the validation set
+  python this_script.py --input valid_data.jsonl --out data_for_opennmt --prefix valid --strategy 3
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TextIO
+
+# --- Optional Dependency Imports ---
+# These try-except blocks check if optional libraries are installed without crashing
+# the script if they are not.
 
 try:
-    # prefer nltk if available for basic tokenization
+    # NLTK provides a more reliable tokenizer than splitting by whitespace.
     import nltk
     _HAS_NLTK = True
-except Exception:
+    print("NLTK found, will use for tokenization.")
+except ImportError:
     _HAS_NLTK = False
+    print("NLTK not found, falling back to simple whitespace tokenization.")
 
-# Hugging Face tokenizer support (optional). We'll lazy-import when requested.
-_HF_AVAILABLE = False
 try:
-    # do not import transformers/tokenizers at module import time; instead lazily load
-    import transformers  # type: ignore
+    # Transformers library is needed for using Hugging Face tokenizers.
+    import transformers
     _HF_AVAILABLE = True
-except Exception:
+except ImportError:
     _HF_AVAILABLE = False
 
+# --- Tokenization Helper Functions ---
 
 def simple_tokenize(text: str) -> List[str]:
-    """Tokenize text into tokens. Use NLTK word_tokenize if available,
-    otherwise fall back to whitespace split.
+    """
+    Tokenizes a string into a list of words.
+    - Prefers NLTK's `word_tokenize` if available.
+    - Falls back to splitting the string by whitespace if NLTK is not installed.
     """
     if not text:
         return []
@@ -46,179 +55,204 @@ def simple_tokenize(text: str) -> List[str]:
         try:
             return nltk.word_tokenize(text)
         except Exception:
+            # Fallback in case NLTK has an issue (e.g., missing data)
             return text.split()
     return text.split()
 
-
 def hf_tokenizer_factory(model_name: str):
-    """Return a tokenizer callable that maps text -> list of tokens using HF tokenizer.
-
-    The returned tokenizer produces tokens as the tokenizer's token strings (subwords).
+    """
+    Creates and returns a tokenizer function powered by the Hugging Face Transformers library.
+    This is used for accurately counting tokens according to a specific model (like BERT).
     """
     if not _HF_AVAILABLE:
-        raise RuntimeError("transformers is not installed; install it or use basic tokenization")
+        raise RuntimeError("The 'transformers' library is not installed. Please install it to use Hugging Face tokenizers.")
+    
     from transformers import AutoTokenizer
-
+    # Load the specified tokenizer model. 'use_fast=True' loads the faster Rust-based version.
     tok = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
     def _tokenize(text: str) -> List[str]:
+        """The actual tokenizer function that will be returned."""
         if not text:
             return []
-        # use tokenizer to return token strings (not ids) so we can detokenize approx with spaces
+        # Encode the text to get token IDs, then convert them back to token strings.
+        # This gives us the subword units (e.g., 'tokenization' -> ['token', '##ization']).
         enc = tok.encode(text, add_special_tokens=False)
-        # convert ids back to tokens
-        toks = tok.convert_ids_to_tokens(enc)
-        return toks
+        return tok.convert_ids_to_tokens(enc)
 
     return _tokenize
 
-
 def detokenize(tokens: List[str]) -> str:
-    """Join tokens back into text."""
+    """A simple helper to join a list of token strings back into a single string."""
     return " ".join(tokens)
 
+# --- Chunking Logic Functions ---
 
-def take_prefix_tokens(text: str, n: int) -> str:
-    tokens = simple_tokenize(text)
+def take_prefix_tokens(text: str, n: int, tokenizer=None) -> str:
+    """Truncates text to the first `n` tokens."""
+    # Use the provided tokenizer function if available, otherwise use the simple one.
+    tokenize_func = tokenizer if tokenizer else simple_tokenize
+    tokens = tokenize_func(text)
     return detokenize(tokens[:n])
 
-
-def concat_and_truncate(parts: List[str], max_tokens: int) -> str:
-    tokens: List[str] = []
+def concat_and_truncate(parts: List[str], max_tokens: int, tokenizer=None) -> str:
+    """Concatenates multiple text parts, then truncates the result to `max_tokens`."""
+    all_tokens: List[str] = []
+    tokenize_func = tokenizer if tokenizer else simple_tokenize
     for p in parts:
         if not p:
             continue
-        tokens.extend(simple_tokenize(p))
-        if len(tokens) >= max_tokens:
+        all_tokens.extend(tokenize_func(p))
+        # Stop adding parts if we've already reached the token limit.
+        if len(all_tokens) >= max_tokens:
             break
-    return detokenize(tokens[:max_tokens])
-
+    return detokenize(all_tokens[:max_tokens])
 
 def chunk_document(doc: Dict[str, Any], tokenizer=None) -> List[str]:
-    """Return list of 8 chunks following the strategies in implementation.md.
-
-    Expected fields in `doc`: 'relatorio' (report), 'voto' (vote), 'acordao' (judgment).
-    Uses token counts approximations. If a field is missing, an empty string is used.
     """
+    Applies the 8 chunking strategies from the paper to a single document.
+    Returns a list of 8 strings, where each string is a chunk.
+    """
+    # Safely get text from the document, with fallbacks for different key names.
     report = doc.get("relatorio", "") or doc.get("relatorio_text", "") or ""
     vote = doc.get("voto", "") or doc.get("voto_text", "") or ""
     judgment = doc.get("acordao", "") or doc.get("acordao_text", "") or ""
 
-    # If an HF tokenizer callable is provided, use it for tokenization and truncation
-    if tokenizer is not None:
-        def tkn_prefix(text: str, n: int) -> str:
-            toks = tokenizer(text)
-            # tokens are subword units; join with space to produce readable output
-            return detokenize(toks[:n])
+    # Define shortcuts for the two main chunking operations.
+    use_prefix = lambda text, n: take_prefix_tokens(text, n, tokenizer)
+    use_concat = lambda parts, n: concat_and_truncate(parts, n, tokenizer)
 
-        def tkn_concat(parts: List[str], max_tokens: int) -> str:
-            toks: List[str] = []
-            for p in parts:
-                if not p:
-                    continue
-                toks.extend(tokenizer(p))
-                if len(toks) >= max_tokens:
-                    break
-            return detokenize(toks[:max_tokens])
+    print("[LOG] Generating 8 chunking strategies for current document...")
 
-        use_prefix = tkn_prefix
-        use_concat = tkn_concat
-    else:
-        use_prefix = lambda text, n: detokenize(simple_tokenize(text)[:n])
-        use_concat = lambda parts, n: concat_and_truncate(parts, n)
-
-    # Strategy definitions (tokens)
-    # 1: 300 report + 100 judgment
+    # --- Define the 8 Strategies ---
+    # Strategies 1-5: Truncate individual sections then combine them.
     s1 = use_prefix(report, 300) + " " + use_prefix(judgment, 100)
-
-    # 2: 300 vote + 100 judgment
     s2 = use_prefix(vote, 300) + " " + use_prefix(judgment, 100)
-
-    # 3: 150 report + 150 vote + 100 judgment
     s3 = use_prefix(report, 150) + " " + use_prefix(vote, 150) + " " + use_prefix(judgment, 100)
-
-    # 4: 400 report
     s4 = use_prefix(report, 400)
-
-    # 5: 400 vote
     s5 = use_prefix(vote, 400)
-
-    # 6: 400(report+vote+judgment) - concatenate then truncate to 400 tokens
+    
+    # Strategies 6-8: Combine full sections first, then truncate the combined text.
     s6 = use_concat([report, vote, judgment], 400)
-
-    # 7: 400(vote+judgment+report)
     s7 = use_concat([vote, judgment, report], 400)
-
-    # 8: 400(judgment+report+vote)
     s8 = use_concat([judgment, report, vote], 400)
 
+    print("[LOG] Finished generating 8 strategies for document.")
+
+    # Return a list containing the 8 generated chunks.
     return [s1.strip(), s2.strip(), s3.strip(), s4.strip(), s5.strip(), s6.strip(), s7.strip(), s8.strip()]
 
+# --- File I/O Functions ---
 
 def read_input(path: str) -> List[Dict[str, Any]]:
+    """
+    Reads an input file that can be either a single JSON array or a JSONL file.
+    Returns a list of documents (as dictionaries).
+    """
     with open(path, "r", encoding="utf-8") as f:
         text = f.read().strip()
         if not text:
             return []
-        # Try JSON lines (multiple JSON objects)
         lines = text.splitlines()
+        # Heuristic to detect JSONL: more than one line, and each non-empty line starts with '{'.
         if len(lines) > 1 and all(l.strip().startswith('{') for l in lines if l.strip()):
-            docs = [json.loads(l) for l in lines if l.strip()]
-            return docs
-        # Otherwise, parse as JSON array or single object
+            return [json.loads(l) for l in lines if l.strip()]
+        # Otherwise, assume it's a standard JSON array or a single object.
         obj = json.loads(text)
-        if isinstance(obj, list):
-            return obj
-        return [obj]
+        return obj if isinstance(obj, list) else [obj]
+
+def save_openmt_data(docs: List[Dict[str, Any]], output_dir: str, prefix: str, strategy: int = 0):
+    """
+    Writes the chunked data into an OpenNMT-py compatible directory structure.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Determine which strategies to process based on the --strategy argument.
+    strategies_to_process = range(1, 9) if strategy == 0 else [strategy]
+
+    # --- Efficiently open all necessary files at once ---
+    src_files: Dict[int, TextIO] = {}
+    tgt_files: Dict[int, TextIO] = {}
+    
+    for i in strategies_to_process:
+        # Create a subdirectory for each strategy (e.g., 'output/strategy_1/').
+        strat_dir = os.path.join(output_dir, f"strategy_{i}")
+        os.makedirs(strat_dir, exist_ok=True)
+        # Define the source and target file paths (e.g., 'train.src.txt').
+        src_path = os.path.join(strat_dir, f"{prefix}.src.txt")
+        tgt_path = os.path.join(strat_dir, f"{prefix}.tgt.txt")
+        # Open the files and store the file handlers in dictionaries.
+        src_files[i] = open(src_path, "w", encoding="utf-8")
+        tgt_files[i] = open(tgt_path, "w", encoding="utf-8")
+
+    # --- Process each document and write to the open files ---
+    for doc in docs:
+        # Get the summary, clean up newlines. Fallback to 'ementa' if 'summary' is missing.
+        summary = (doc.get("summary") or doc.get("ementa", "")).replace("\n", " ").strip()
+        chunks = doc.get("chunks", [])
+        
+        for i in strategies_to_process:
+            # Get the correct chunk for the current strategy.
+            chunk_text = chunks[i-1].strip() if len(chunks) >= i else ""
+            # Write the chunk to the corresponding source file and the summary to the target file.
+            src_files[i].write(chunk_text + "\n")
+            tgt_files[i].write(summary + "\n")
+
+    # --- Clean up by closing all opened files ---
+    for i in strategies_to_process:
+        src_files[i].close()
+        tgt_files[i].close()
+        print(f"[LOG] Closed files for strategy {i}")
 
 
-def write_jsonl(items: List[Dict[str, Any]], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        for it in items:
-            f.write(json.dumps(it, ensure_ascii=False) + "\n")
+    print(f"Success! Wrote '{prefix}' data for strategies {list(strategies_to_process)} to '{output_dir}'.")
 
+# --- Main Execution Block ---
 
 def main():
-    parser = argparse.ArgumentParser(description="Chunk RulingBR documents into predefined strategies")
-    parser.add_argument("--input", required=True, help="Input JSON/JSONL file (rulingbr sample or jsonl)")
-    parser.add_argument("--out", required=True, help="Output JSONL path")
-    parser.add_argument("--strategy", type=int, choices=list(range(1, 9)), default=0,
-                        help="If set, only include this 1-based strategy index in 'chunks' array (default: include all)")
-    parser.add_argument("--tokenizer-model", type=str, default="bert-base-multilingual-cased",
-                        help="Hugging Face tokenizer model for token counting/truncation (default: bert-base-multilingual-cased). If transformers is not installed or model cannot be downloaded, falls back to basic tokenization.")
-    parser.add_argument("--nrows", type=int, default=0, help="Process only first N rows (0 = all)")
+    """Parses command-line arguments and orchestrates the chunking and saving process."""
+    # Setup the argument parser to define the command-line interface.
+    parser = argparse.ArgumentParser(description="Chunk RulingBR documents into OpenNMT-py format")
+    parser.add_argument("--input", required=True, help="Input JSON/JSONL file (e.g., rulingbr-v1.2.jsonl)")
+    parser.add_argument("--out", required=True, help="Output directory for OpenNMT formatted files")
+    parser.add_argument("--prefix", type=str, default="train", help="File prefix for the output files (e.g., train, valid, or test)")
+    parser.add_argument("--strategy", type=int, choices=list(range(1, 9)), default=0, help="If set, only process this 1-based strategy index (default: process all)")
+    parser.add_argument("--tokenizer-model", type=str, default="bert-base-multilingual-cased", help="Hugging Face tokenizer model for accurate token counting.")
+    parser.add_argument("--nrows", type=int, default=0, help="Process only the first N rows for quick testing (0 = all)")
     args = parser.parse_args()
 
+    # 1. Read all documents from the input file.
+    print("[LOG] Starting chunking process...")
     docs = read_input(args.input)
-    out_docs = []
     n = args.nrows or len(docs)
-    # Build optional HF tokenizer callable if requested
+    print(f"[LOG] Loaded {len(docs)} documents. Processing first {n}.")
+    
+    # 2. Initialize the tokenizer if requested.
     hf_tok = None
     if args.tokenizer_model:
         if not _HF_AVAILABLE:
-            # warn and fall back
-            print("WARNING: transformers not available; falling back to basic tokenization. To enable HF tokenizer install requirements.txt")
-            hf_tok = None
+            print("WARNING: 'transformers' is not installed. Falling back to basic tokenization.")
         else:
             try:
+                print(f"Loading tokenizer: {args.tokenizer_model}...")
                 hf_tok = hf_tokenizer_factory(args.tokenizer_model)
+                print("Tokenizer loaded.")
             except Exception as e:
-                print(f"WARNING: failed to load tokenizer {args.tokenizer_model}: {e}\nFalling back to basic tokenization.")
-                hf_tok = None
+                print(f"WARNING: Failed to load tokenizer '{args.tokenizer_model}': {e}\nFalling back to basic tokenization.")
 
-    for i, doc in enumerate(docs[:n]):
-        chunks = chunk_document(doc, tokenizer=hf_tok)
-        if args.strategy:
-            idx = args.strategy - 1
-            doc_out = dict(doc)
-            doc_out["chunks"] = [chunks[idx]]
-        else:
-            doc_out = dict(doc)
-            doc_out["chunks"] = chunks
-        out_docs.append(doc_out)
+    # 3. For each document, generate the 8 chunks and add them back to the document dictionary.
+    print(f"[LOG] Generating chunks for {len(docs[:n])} documents...")
+    for idx, doc in enumerate(docs[:n]):
+        if idx % 100 == 0 and idx > 0:
+            print(f"[LOG] Chunked {idx} documents so far...")
+        doc["chunks"] = chunk_document(doc, tokenizer=hf_tok)
+    print("[LOG] Chunk generation complete.")
 
-    write_jsonl(out_docs, args.out)
-
+    # 4. Save the processed documents into the OpenNMT-py compatible directory structure.
+    print("[LOG] Saving chunked data to output directory...")
+    save_openmt_data(docs[:n], args.out, args.prefix, args.strategy)
+    print("[LOG] All processing completed successfully.")
 
 if __name__ == "__main__":
+    # This ensures the main() function is called only when the script is executed directly.
     main()
