@@ -217,3 +217,5 @@ __marimo__/
 
 *.jsonl
 output/
+output_full_dep/
+*.json

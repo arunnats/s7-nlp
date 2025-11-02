@@ -1,0 +1,46 @@
+## Where the samples (vocab, transforms) will be saved
+save_data: data_for_opennmt/run/rulingbr
+
+# Corpus opts: Define your data paths (e.g., for Strategy 6)
+data:
+    corpus_1:
+        path_src: output/strategy_6/train.src.txt  # ⬅️ Change Strategy # as needed
+        path_tgt: output/strategy_6/train.tgt.txt  # ⬅️ Change Strategy # as needed
+        valid:
+            path_src: output/strategy_6/valid.src.txt # Assuming you chunked validation data too
+            path_tgt: output/strategy_6/valid.tgt.txt
+
+# Model Architecture Parameters
+encoder_type: transformer
+decoder_type: transformer
+layers: 6
+rnn_size: 512       # d_model
+word_vec_size: 512  # Embedding dim
+transformer_ff: 2048
+heads: 8
+
+# Optimization Parameters (Crucial for Transformer)
+optim: adam
+learning_rate: 2
+decay_method: noam
+warmup_steps: 8000
+adam_beta1: 0.9
+adam_beta2: 0.998
+label_smoothing: 0.1 # Standard for Transformer
+
+# Training Parameters
+train_steps: 200000  # Adjust as needed
+valid_steps: 5000
+save_checkpoint_steps: 10000
+seed: 42
+max_generator_batches: 2 # Optimization
+
+# GPU Setup
+world_size: 1
+gpu_ranks: [0]
+# Use tokens-based batching for efficient memory usage
+batch_type: tokens 
+batch_size: 4096     # Max tokens per batch (adjust if you get CUDA OOM errors)
+
+# Save Model Output
+save_model: data_for_opennmt/models/rulingbr_model
