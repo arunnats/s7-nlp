@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 from typing import List, Dict, Any, TextIO
+from multiprocessing import Pool, cpu_count
 
 # --- Optional Dependency Imports ---
 # These try-except blocks check if optional libraries are installed without crashing
@@ -241,12 +242,22 @@ def main():
                 print(f"WARNING: Failed to load tokenizer '{args.tokenizer_model}': {e}\nFalling back to basic tokenization.")
 
     # 3. For each document, generate the 8 chunks and add them back to the document dictionary.
-    print(f"[LOG] Generating chunks for {len(docs[:n])} documents...")
-    for idx, doc in enumerate(docs[:n]):
-        if idx % 100 == 0 and idx > 0:
-            print(f"[LOG] Chunked {idx} documents so far...")
+    print(f"[LOG] Generating chunks for {len(docs[:n])} documents using {cpu_count()} CPU cores...")
+
+    def _process_doc(doc):
+        """Wrapper for parallel chunking"""
         doc["chunks"] = chunk_document(doc, tokenizer=hf_tok)
-    print("[LOG] Chunk generation complete.")
+        return doc
+
+    with Pool(processes=max(1, cpu_count() - 1)) as pool:
+        processed_docs = []
+        for idx, doc in enumerate(pool.imap(_process_doc, docs[:n], chunksize=20)):
+            if idx % 100 == 0 and idx > 0:
+                print(f"[LOG] Chunked {idx} documents so far...")
+            processed_docs.append(doc)
+
+    docs = processed_docs
+    print("[LOG] Parallel chunk generation complete.")
 
     # 4. Save the processed documents into the OpenNMT-py compatible directory  .
     print("[LOG] Saving chunked data to output directory...")
