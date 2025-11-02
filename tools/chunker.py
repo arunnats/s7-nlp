@@ -248,9 +248,9 @@ def main():
         doc["chunks"] = chunk_document(doc, tokenizer=hf_tok)
     print("[LOG] Chunk generation complete.")
 
-    # 4. Save the processed documents into the OpenNMT-py compatible directory structure.
+    # 4. Save the processed documents into the OpenNMT-py compatible directory  .
     print("[LOG] Saving chunked data to output directory...")
-    save_openmt_data(docs[:n], args.out, args.prefix, args.strategy)
+    save_openmt_data(docs[:n], args.out, args.prefix, args.strategy) 
     print("[LOG] All processing completed successfully.")
 
 if __name__ == "__main__":
