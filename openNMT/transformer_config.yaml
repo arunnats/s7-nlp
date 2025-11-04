@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# OpenNMT-py Configuration for LegalSumm Summarization Models
+# Based on: "Improving abstractive summarization of legal rulings..."
+# ---------------------------------------------------------------------------
+
+# --- Data paths (These will be specified on the command line) ---
+data:
+  corpus_1:
+    path_src: output/strategy_1/train.src.txt
+    path_tgt: output/strategy_1/train.tgt.txt
+  valid:
+    path_src: output/strategy_1/valid.src.txt
+    path_tgt: output/strategy_1/valid.tgt.txt
+
+# --- Vocabulary Settings ---
+src_vocab: onmt_data/shared_vocabulary.vocab
+tgt_vocab: onmt_data/shared_vocabulary.vocab
+share_vocab: true
+
+# --- Model Architecture (as per the paper) ---
+model_dtype: fp16
+encoder_type: transformer
+decoder_type: transformer
+enc_layers: 6
+dec_layers: 6
+heads: 8
+hidden_size: 512
+word_vec_size: 512
+transformer_ff: 2048
+dropout: 0.1
+position_encoding: true
+
+# --- Training Hyperparameters (as per the paper) ---
+train_steps: 20000
+valid_steps: 1000
+save_checkpoint_steps: 1000
+report_every: 100
+
+# --- Optimization & Learning Rate ---
+optim: adam
+learning_rate: 0.001
+adam_beta2: 0.998
+label_smoothing: 0.1
+warmup_steps: 4000
+
+# --- Batching ---
+batch_size: 6144
+batch_type: tokens
+
+batch_size_multiple: 8
+
+num_workers: 4
+bucket_size: 32768
